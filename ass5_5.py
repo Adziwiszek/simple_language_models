@@ -253,6 +253,41 @@ class LSTMLayer(nn.Module):
         outputs = torch.stack(outputs)
         return outputs, (H, C)
 
+"""GRU layer"""
+class GRULayer(nn.Module):
+    def __init__(self, num_inputs, num_hiddens, sigma=0.01):
+        super().__init__()
+        self.num_inputs = num_inputs
+        self.num_hiddens = num_hiddens
+        self.sigma = sigma
+
+        init_weight = lambda *shape: nn.Parameter(torch.randn(*shape) * sigma)
+        triple = lambda: (init_weight(num_inputs, num_hiddens),
+                          init_weight(num_hiddens, num_hiddens),
+                          nn.Parameter(torch.zeros(num_hiddens)))
+
+        self.W_xz, self.W_hz, self.b_z = triple()  # Update gate
+        self.W_xr, self.W_hr, self.b_r = triple()  # Reset gate
+        self.W_xh, self.W_hh, self.b_h = triple()  # Candidate hidden state
+
+    def forward(self, inputs, H=None):
+        if H is None:
+            # Initial state with shape: (batch_size, num_hiddens)
+            H = torch.zeros((inputs.shape[1], self.num_hiddens),
+                          device=inputs.device)
+        outputs = []
+        for X in inputs:
+            Z = torch.sigmoid(torch.matmul(X, self.W_xz) +
+                            torch.matmul(H, self.W_hz) + self.b_z)
+            R = torch.sigmoid(torch.matmul(X, self.W_xr) +
+                            torch.matmul(H, self.W_hr) + self.b_r)
+            H_tilde = torch.tanh(torch.matmul(X, self.W_xh) +
+                               torch.matmul(R * H, self.W_hh) + self.b_h)
+            H = Z * H + (1 - Z) * H_tilde
+            outputs.append(H)
+        outputs = torch.stack(outputs)
+        return outputs, H
+
 """## Model itself"""
 
 class RNNModel(nn.Module):
@@ -265,6 +300,8 @@ class RNNModel(nn.Module):
             self.rnn = RNNLayer(num_inputs=embedding_dim, num_hidden=hidden_size)
         elif layer_type == 'lstm':
             self.rnn = LSTMLayer(num_inputs=embedding_dim, num_hiddens=hidden_size)
+        elif layer_type == 'gru':
+            self.rnn = GRULayer(num_inputs=embedding_dim, num_hiddens=hidden_size)
         else:
             raise ValueError(f"No layer {layer_type}. Pick one from: 'rnn'")
         self.output_layer = nn.Linear(hidden_size, vocab_size)
@@ -340,6 +377,10 @@ def train(
             if batch_count % log_every == 0:
                 print(f'batch {batch_count}, avg loss: {total_loss/batch_count}')
 
+            wandb.log({
+                "train_loss": total_loss/batch_count,
+            })
+
         avg_loss = total_loss / batch_count
 
         # save best model
@@ -352,9 +393,6 @@ def train(
             wandb.log_artifact(artifact)
 
         train_losses.append(avg_loss)
-        wandb.log({
-            "train_loss": avg_loss,
-        })
         print(f"Epoch {epoch+1}, Loss: {avg_loss}")
 
     '''
@@ -395,23 +433,38 @@ def perform_experiment(
         log_every=1000,
     )
     # generating predictions
-    prefix = 'oh romeo i '
+    '''prefix = 'oh romeo i '
     preds = model.predict_mass(prefix, num_preds=8, num_trials=5)
     wandb.log({
         'predictions': preds,
     })
-    print(f'model predictions for: {prefix}\n{preds}')
+    print(f'model predictions for: {prefix}\n{preds}')'''
+    
+    columns = ["Prompt", "Generation 1", "Generation 2", "Generation 3", "Generation 4"]
+    table = wandb.Table(columns=columns)
+
+    prompts = ["oh romeo my romeo ", "i think we should ", "let us take this moment "]
+    for prompt in prompts:
+        row = [prompt]
+        for _ in range(4):
+            text = model.predict(prompt, 7)
+            row.append(text)
+        table.add_data(*row)
+
+    wandb.run.summary["final_predictions"] = table
     # finishing wanbd_run
     finish_wandb()
 
     return model
 
-model = perform_experiment(
-    'rnn',
-    num_epochs=2,
-    hidden_size=128,
-    lr=0.001,
-    tags=[],
-)
+models_to_test = ['rnn', 'lstm', 'gru']
+for model_type in models_to_test:
+    model = perform_experiment(
+        model_type,
+        num_epochs=4,
+        hidden_size=128,
+        lr=0.001,
+        tags=[],
+    )
 
-print(model.predict('romeo i want ',  10))
+    print(model.predict('romeo i want ',  10))
